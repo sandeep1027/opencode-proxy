@@ -5,9 +5,8 @@ import { resolveModel, getProvider, ALL_MODELS } from "./models.js";
 
 dotenv.config();
 
-const app = Fastify({ logger: true });
+const app = Fastify({ logger: false });
 
-// ✅ JSON body parser
 app.addContentTypeParser("application/json", { parseAs: "string" }, (req, body, done) => {
   try {
     done(null, JSON.parse(body));
@@ -16,17 +15,10 @@ app.addContentTypeParser("application/json", { parseAs: "string" }, (req, body, 
   }
 });
 
-// 📨 request logger
-app.addHook("onRequest", (req, reply, done) => {
-  console.log("📨 Incoming:", req.method, req.url);
-  done();
-});
-
 const PORT = process.env.PORT || 4000;
 const API_KEY = process.env.OPENCODE_API_KEY?.trim();
 const BASE = process.env.OPENCODE_BASE;
 
-// 🧠 SAFE TEXT EXTRACTOR
 function extractText(data) {
   if (data?.choices?.[0]?.message?.content) {
     return data.choices[0].message.content;
@@ -43,7 +35,6 @@ function extractText(data) {
   return "";
 }
 
-// 🔧 EXTRACT TOOL CALLS (Anthropic native format)
 function extractToolCalls(data) {
   if (!Array.isArray(data?.content)) return null;
   const toolUseBlocks = data.content.filter(x => x.type === "tool_use");
@@ -58,7 +49,6 @@ function extractToolCalls(data) {
   }));
 }
 
-// 🔧 BUILD COPILOT-COMPATIBLE RESPONSE
 function buildResponse(content, model) {
   return {
     id: "chatcmpl-" + Date.now(),
@@ -83,7 +73,6 @@ function buildResponse(content, model) {
   };
 }
 
-// 🔧 BUILD TOOL CALL RESPONSE
 function buildToolCallResponse(toolCalls, model) {
   return {
     id: "chatcmpl-" + Date.now(),
@@ -109,7 +98,6 @@ function buildToolCallResponse(toolCalls, model) {
   };
 }
 
-// 🔧 SEND AS STREAM (plain text)
 function sendAsStream(reply, content, model) {
   const id = "chatcmpl-" + Date.now();
   const created = Math.floor(Date.now() / 1000);
@@ -135,7 +123,6 @@ function sendAsStream(reply, content, model) {
   reply.raw.end();
 }
 
-// 🔧 SEND TOOL CALLS AS STREAM
 function sendToolCallsAsStream(reply, toolCalls, model) {
   const id = "chatcmpl-" + Date.now();
   const created = Math.floor(Date.now() / 1000);
@@ -177,12 +164,10 @@ function sendToolCallsAsStream(reply, toolCalls, model) {
   reply.raw.end();
 }
 
-// 🔧 FORMAT MESSAGES FOR ANTHROPIC
 function formatMessagesForAnthropic(messages) {
   return (messages || [])
     .filter(m => m.role !== "system")
     .map(msg => {
-      // tool result
       if (msg.role === "tool") {
         return {
           role: "user",
@@ -196,7 +181,6 @@ function formatMessagesForAnthropic(messages) {
         };
       }
 
-      // assistant with tool calls
       if (msg.role === "assistant" && msg.tool_calls) {
         return {
           role: "assistant",
@@ -212,7 +196,6 @@ function formatMessagesForAnthropic(messages) {
         };
       }
 
-      // regular message
       return {
         role: msg.role,
         content: [{
@@ -225,12 +208,10 @@ function formatMessagesForAnthropic(messages) {
     });
 }
 
-// ❤️ health
 app.get("/health", async () => {
   return { status: "ok" };
 });
 
-// 📋 models list
 app.get("/v1/models", async (req, reply) => {
   reply.header("Content-Type", "application/json; charset=utf-8");
   return reply.send({
@@ -244,15 +225,12 @@ app.get("/v1/models", async (req, reply) => {
   });
 });
 
-// 🚀 MAIN ENDPOINT
 app.post("/v1/chat/completions", async (req, reply) => {
   try {
     const body = req.body || {};
     const model = resolveModel(body.model);
     const provider = getProvider(model);
     const isStream = body.stream === true;
-
-    console.log("➡️  Model:", model, "| Provider:", provider, "| Stream:", isStream);
 
     let url;
     let payload;
@@ -269,7 +247,7 @@ app.post("/v1/chat/completions", async (req, reply) => {
         ...(systemMsg && { system: systemMsg.content }),
         messages: formattedMessages,
         max_tokens: body.max_tokens || 4096,
-        stream: true, // always stream from OpenCode for anthropic
+        stream: true,
         ...(body.tools && {
           tools: body.tools.map(t => ({
             name: t.function.name,
@@ -304,16 +282,13 @@ app.post("/v1/chat/completions", async (req, reply) => {
       };
     }
 
-    console.log("🌐 URL:", url);
-    console.log("📦 Payload:", JSON.stringify(payload, null, 2));
-
     const upstream = await request(url, {
       method: "POST",
       headers,
       body: JSON.stringify(payload)
     });
 
-    // 🚀 OpenAI native stream — pipe directly
+    // OpenAI native stream — pipe directly
     if (isStream && provider === "openai") {
       reply.raw.writeHead(200, {
         "Content-Type": "text/event-stream",
@@ -327,7 +302,7 @@ app.post("/v1/chat/completions", async (req, reply) => {
       return;
     }
 
-    // 🚀 Anthropic stream — convert to OpenAI SSE format in real time
+    // Anthropic stream — convert to OpenAI SSE format in real time
     if (provider === "anthropic") {
       reply.raw.writeHead(200, {
         "Content-Type": "text/event-stream",
@@ -343,7 +318,7 @@ app.post("/v1/chat/completions", async (req, reply) => {
       for await (const chunk of upstream.body) {
         buffer += chunk.toString();
         const lines = buffer.split("\n");
-        buffer = lines.pop(); // keep incomplete line
+        buffer = lines.pop();
 
         for (const line of lines) {
           if (!line.startsWith("data:")) continue;
@@ -353,9 +328,6 @@ app.post("/v1/chat/completions", async (req, reply) => {
           let event;
           try { event = JSON.parse(raw); } catch { continue; }
 
-          console.log("🔄 Anthropic event:", event.type);
-
-          // text delta
           if (event.type === "content_block_delta" && event.delta?.type === "text_delta") {
             const outChunk = JSON.stringify({
               id, object: "chat.completion.chunk", created, model,
@@ -364,7 +336,6 @@ app.post("/v1/chat/completions", async (req, reply) => {
             reply.raw.write(`data: ${outChunk}\n\n`);
           }
 
-          // tool use start
           if (event.type === "content_block_start" && event.content_block?.type === "tool_use") {
             const idx = event.index;
             toolCalls[idx] = {
@@ -392,7 +363,6 @@ app.post("/v1/chat/completions", async (req, reply) => {
             reply.raw.write(`data: ${outChunk}\n\n`);
           }
 
-          // tool input delta
           if (event.type === "content_block_delta" && event.delta?.type === "input_json_delta") {
             const idx = event.index;
             if (toolCalls[idx]) {
@@ -414,13 +384,6 @@ app.post("/v1/chat/completions", async (req, reply) => {
             reply.raw.write(`data: ${outChunk}\n\n`);
           }
 
-          // thinking delta (skip — don't send to Copilot)
-          if (event.type === "content_block_delta" && event.delta?.type === "thinking_delta") {
-            console.log("💭 Thinking:", event.delta.thinking?.slice(0, 50));
-            // intentionally skipped
-          }
-
-          // stop reason
           if (event.type === "message_delta" && event.delta?.stop_reason) {
             const stopReason = event.delta.stop_reason === "tool_use" ? "tool_calls" : "stop";
             const doneChunk = JSON.stringify({
@@ -430,7 +393,6 @@ app.post("/v1/chat/completions", async (req, reply) => {
             reply.raw.write(`data: ${doneChunk}\n\n`);
           }
 
-          // message stop
           if (event.type === "message_stop") {
             reply.raw.write("data: [DONE]\n\n");
           }
@@ -441,9 +403,8 @@ app.post("/v1/chat/completions", async (req, reply) => {
       return;
     }
 
-    // non-stream fallback (shouldn't normally hit this)
+    // non-stream fallback
     const data = await upstream.body.json();
-    console.log("🔍 Raw response:", JSON.stringify(data, null, 2));
 
     if (data?.type === "error" || data?.error) {
       const errMsg = data?.error?.message || JSON.stringify(data);
@@ -459,7 +420,6 @@ app.post("/v1/chat/completions", async (req, reply) => {
 
     const toolCalls2 = extractToolCalls(data);
     if (toolCalls2) {
-      console.log("🔧 Tool calls:", JSON.stringify(toolCalls2, null, 2));
       if (isStream) { sendToolCallsAsStream(reply, toolCalls2, model); return; }
       const toolResponse = JSON.stringify(buildToolCallResponse(toolCalls2, model));
       return reply
@@ -473,7 +433,6 @@ app.post("/v1/chat/completions", async (req, reply) => {
     if (isStream) { sendAsStream(reply, content, model); return; }
 
     const finalResponse = JSON.stringify(buildResponse(content, model));
-    console.log("📤 Sending:", finalResponse);
     return reply
       .code(200)
       .header("Content-Type", "application/json; charset=utf-8")
@@ -495,7 +454,6 @@ app.post("/v1/chat/completions", async (req, reply) => {
   }
 });
 
-// start
 app.listen({ port: PORT, host: "0.0.0.0" }, (err) => {
   if (err) {
     console.error(err);
